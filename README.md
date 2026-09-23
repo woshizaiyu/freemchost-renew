@@ -9,10 +9,10 @@
 
 | 名称 | 是否必填 | 说明 | 示例 |
 |---|---|---|---|
-| `FREE_EMAIL` | ✅ 必需*1 | 账号邮箱（与密码配对提供时，优先自动登录） | `lds924494@gmail.com` |
+| `FREE_EMAIL` | ✅ 必需*1 | 账号邮箱（与密码配对提供时，优先自动登录） | `your@email.com` |
 | `FREE_PASSWORD` | ✅ 必需*1 | 账号密码 | `***` |
-| `SERVER_PAGE_URL` | ❌ 可选 | 服务器管理页完整 URL，可填多个（换行/逗号分隔） | `https://freemchhost.com/app/servers/d896c3d3-cbdc-4cbd-92ae-2e89781ab0ac` |
-| `SERVER_ID` | ❌ 可选 | 仅填写服务器 ID（UUID），自动拼接为完整路径；多个用换行/逗号分隔 | `d896c3d3-cbdc-4cbd-92ae-2e89781ab0ac` |
+| `SERVER_PAGE_URL` | ❌ 可选 | 服务器管理页完整 URL，可填多个（换行/逗号分隔） | `https://freemchost.com/app/servers/YOUR_SERVER_ID` |
+| `SERVER_ID` | ❌ 可选 | 仅填写服务器 ID（UUID），自动拼接为完整路径；多个用换行/逗号分隔 | `YOUR_SERVER_ID` |
 | `AUTH_STATE` | ❌ 可选 | **登录态 JSON**（Playwright `storageState()`），注入后可跳过登录；推荐用于“永久免维护”方案（回写至本 Secret） | 从浏览器导出 JSON 或 Base64 |
 | `GH_TOKEN` | ❌ 可选 | GitHub Personal Access Token（classic），用于回写 `AUTH_STATE` 等 Secret | `ghp_xxx` |
 | `TG_BOT_TOKEN` | ❌ 可选 | Telegram Bot Token | `123456:AAA-xxx` |
@@ -61,7 +61,6 @@
 | `NAV_TIMEOUT` | `90000` | 页面导航超时（毫秒） |
 | `DRY_RUN` | `false` | 演练模式：只打印不会真正点击续期按钮 |
 | `AUTO_UPDATE_STATE` | `true` | 登录成功后将最新登录态回写到 GH Secret（依赖 `GH_TOKEN`） |
-| `SAVE_STATE` | `true` | 是否保存登录态截图到 artifacts |
 
 ---
 
