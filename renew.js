@@ -96,6 +96,43 @@ function maskUrl(u) {
   return String(u || '').replace(/(code=|token=|access_token=)[^&]+/gi, '$1***');
 }
 
+/** TCP 探测 host:port 是否可连（代理存活校验），ms 超时 */
+function tcpProbe(host, port, ms = 5000) {
+  return new Promise((resolve) => {
+    const net = require('net');
+    const s = new net.Socket();
+    let done = false;
+    const fin = (ok) => { if (!done) { done = true; s.destroy(); resolve(ok); } };
+    s.setTimeout(ms);
+    s.once('connect', () => fin(true));
+    s.once('timeout', () => fin(false));
+    s.once('error', () => fin(false));
+    s.connect(port, host);
+  });
+}
+
+/** 解析 PROXY_URL 为 {host,port}，非法返回 null */
+function parseProxyHostPort(p) {
+  try {
+    const u = new URL(p);
+    if (!u.hostname || !u.port) return null;
+    return { host: u.hostname, port: Number(u.port) };
+  } catch { return null; }
+}
+
+/** page.goto 带重试：ERR_CONNECTION_RESET 等网络抖动退避重试 */
+async function gotoRetry(page, url, opts = {}, retries = 3) {
+  let last;
+  for (let i = 1; i <= retries; i++) {
+    try { return await page.goto(url, opts); } catch (e) {
+      last = e;
+      log(`⚠️ 导航失败(${i}/${retries}): ${String(e.message).split('\n')[0].slice(0, 120)}`);
+      if (i < retries) await sleep(3000 * i);
+    }
+  }
+  throw last;
+}
+
 /** 解析目标服务器列表：完整 URL 或裸 ID */
 function parseTargets() {
   const raw = [env('SERVER_PAGE_URL'), env('SERVER_ID')].filter(Boolean).join('\n');
@@ -265,13 +302,29 @@ async function safeShot(page, name) {
 
 /* ============================== 登录态 ============================== */
 
-/** 读取 AUTH_STATE（内联 JSON / base64(JSON) / 文件路径） */
+/** 读取 AUTH_STATE（内联 JSON / base64(JSON) / 文件路径）；兼容 storageState: {...} 前缀粘贴 */
 function loadAuthState() {
   const candidates = [];
   if (CFG.authStateFile && fs.existsSync(CFG.authStateFile)) candidates.push(fs.readFileSync(CFG.authStateFile, 'utf8'));
   if (CFG.authStateRaw) candidates.push(CFG.authStateRaw);
+  const stripPrefix = (s) => {
+    let t = String(s || '').trim();
+    // 去掉 storageState: / storageState = / const storageState = 等前缀，只留 {...}
+    const m = t.match(/^(?:(?:const|let|var)\s+)?storageState\s*[:=]\s*(\{[\s\S]*\})\s*;?\s*$/);
+    if (m) return m[1];
+    // 首个 { 起截（容忍前导注释/说明文字）
+    const i = t.indexOf('{');
+    const j = t.lastIndexOf('}');
+    if (i >= 0 && j > i && (i > 0)) {
+      const sub = t.slice(i, j + 1);
+      try { JSON.parse(sub); return sub; } catch { /* not json */ }
+    }
+    return t;
+  };
   for (const c of candidates) {
-    const tries = [c, Buffer.from(c, 'base64').toString('utf8')];
+    const cleaned = stripPrefix(c);
+    const tries = [cleaned];
+    try { tries.push(Buffer.from(cleaned, 'base64').toString('utf8')); } catch { /* ignore */ }
     for (const t of tries) {
       try {
         const j = JSON.parse(t);
@@ -279,6 +332,7 @@ function loadAuthState() {
       } catch { /* ignore */ }
     }
   }
+  if (CFG.authStateRaw) log(`⚠️ AUTH_STATE 已配置(${CFG.authStateRaw.length}字)但解析失败：需纯JSON{"cookies":[],"origins":[]}，去掉storageState:前缀或转base64`);
   return null;
 }
 
@@ -576,7 +630,7 @@ async function renewOneServer(context, url, idx, total) {
       }
     });
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
+    await gotoRetry(page, url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
     await sleep(2500);
     await dismissNoise(page);
 
@@ -671,7 +725,7 @@ async function renewOneServer(context, url, idx, total) {
     // 跨上下文硬核验（wittyconan 的核心设计：必须真实入库才算成功）
     const verify = await context.newPage();
     try {
-      await verify.goto(url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
+      await gotoRetry(verify, url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
       await sleep(2200);
       await dismissNoise(verify);
       if (await openManageMenu(verify)) { await clickByText(manageScope(verify), ['Billing'], { timeout: 1500 }).catch(() => false); await sleep(1500); }
@@ -716,7 +770,7 @@ async function renewOneServer(context, url, idx, total) {
 
 async function doLogin(page) {
   log('🔑 账号密码登录 Supabase Auth（freemchost 前端登录页）');
-  await page.goto(CFG.loginUrl, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
+  await gotoRetry(page, CFG.loginUrl, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
   await sleep(2500);
   await dismissNoise(page, '(登录页)');
 
@@ -778,7 +832,15 @@ async function doLogin(page) {
     ],
   };
   if (CFG.proxyUrl) {
-    try { launchOpts.proxy = { server: CFG.proxyUrl }; log(`🔗 代理: ${CFG.proxyUrl}`); } catch (e) { log(`⚠️ 代理参数无效: ${e.message}`); }
+    const hp = parseProxyHostPort(CFG.proxyUrl);
+    // CI 里 PROXY_URL=127.0.0.1:1080 可能是脏环境(sing-box 起在混用端口/残留代理)：先 TCP 探测，不通直接直连
+    const alive = hp ? await tcpProbe(hp.host, hp.port, 5000) : false;
+    if (alive) {
+      try { launchOpts.proxy = { server: CFG.proxyUrl }; log(`🔗 代理存活: ${CFG.proxyUrl}，走代理`); } catch (e) { log(`⚠️ 代理参数无效: ${e.message}`); }
+    } else {
+      log(`⚠️ 代理不可连(${CFG.proxyUrl})，本次直连（CI 脏代理常见：sing-box 混用1080/残留 PROXY_URL Secret）`);
+      CFG.proxyUrl = '';
+    }
   } else { log('🍭 直连模式（若频繁失败请配置 NODE_LINK 或 PROXY_URL）'); }
   if (CFG.channel) { launchOpts.channel = CFG.channel; log(`🧭 channel=${CFG.channel}`); }
 

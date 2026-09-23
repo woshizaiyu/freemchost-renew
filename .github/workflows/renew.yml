@@ -37,11 +37,11 @@ jobs:
           P: ${{ secrets.PROXY_URL }}
         run: |
           if [ -n "$P" ]; then echo "url=$P" >> $GITHUB_OUTPUT;
-          elif [ "${{ secrets.NODE_LINK }}" != "" ]; then echo "url=http://127.0.0.1:1080" >> $GITHUB_OUTPUT;
+          elif [ "${{ secrets.NODE_LINK }}" != "" ]; then echo "url=socks5://127.0.0.1:1080" >> $GITHUB_OUTPUT;
           else echo "url=" >> $GITHUB_OUTPUT; fi
 
       - name: ⚙️ 部署 sing-box 代理
-        if: ${{ steps.proxy.outputs.url == 'http://127.0.0.1:1080' }}
+        if: ${{ steps.proxy.outputs.url == 'socks5://127.0.0.1:1080' }}
         continue-on-error: true
         env:
           NODE_LINK: ${{ secrets.NODE_LINK }}
