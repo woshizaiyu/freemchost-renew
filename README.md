@@ -38,7 +38,7 @@
 编辑 `.github/workflows/renew.yml` 中的 `cron` 字段：
 
 ```yaml
-- cron: '10 */6 * * *'   # 每 6 小时巡检一次
+- cron: '10 2 */2 * *'   # 每 2 天巡检一次（约48h，最接近46h的cron表达）
 ```
 
 ---

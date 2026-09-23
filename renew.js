@@ -908,7 +908,7 @@ async function doLogin(page) {
     return `${ICON[r.status] || '❔'} <b>[${r.idx}/${r.total}] ${r.id}${n}</b>\n   ${LABEL[r.status] || r.status}` +
       `${r.before ? ` | ${r.before}${r.after ? ` ➔ ${r.after}` : ''}` : ''}${r.note ? `\n   └ ${r.note}` : ''}`;
   });
-  const sum = `🖥 <b>FreeMCHost 自动续期报告</b>\n\n${lines.join('\n')}\n\n<b>阈值</b> &lt;${CFG.thresholdHours}h 触发 · <b>周期</b> 每 6h 巡检\n<b>时间</b> ${nowStr()}`;
+  const sum = `🖥 <b>FreeMCHost 自动续期报告</b>\n\n${lines.join('\n')}\n\n<b>阈值</b> &lt;${CFG.thresholdHours}h 触发 · <b>周期</b> 每 2天巡检\n<b>时间</b> ${nowStr()}`;
   await sendTelegram(sum);
   console.log('\n================ 汇总 ================');
   results.forEach((r) => console.log(`${ICON[r.status]} [${r.idx}/${r.total}] ${r.id} ${r.before}${r.after ? ' ➔ ' + r.after : ''} ${r.note}`));
