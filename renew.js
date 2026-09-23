@@ -65,6 +65,9 @@ const CFG = {
     .split(/[,|\n]/).map((s) => s.trim()).filter(Boolean),
   headless: bool('HEADLESS', true),
   dryRun: bool('DRY_RUN', false),
+  apiDirect: env('API_DIRECT', 'check'), // check = 先直调查续期资格再走浏览器; off = 纯浏览器
+  serverFnHash: env('SERVERFN_HASH'), // 为空用录制hash；漂移时手动覆盖
+  serverFnF: num('SERVERFN_F', 63), // 续期意图函数号(录制值63,随构建漂移;直调失败时改这里或置空回退)
   timezone: env('TIMEZONE', 'Asia/Shanghai'),
   locale: env('LOCALE', 'en-US'),
   channel: env('BROWSER_CHANNEL'),
@@ -109,6 +112,102 @@ function parseTargets() {
 function serverIdOf(url) {
   const m = String(url).match(/servers?\/([0-9a-zA-Z-]+)/);
   return m ? m[1] : (String(url).split('/').pop() || 'unknown');
+}
+
+/* ============================== API 直调预检 ==============================
+ * 录制证据(session 17820de0)：POST /_serverFn/<hash> {f:63, m:[], t:{...id...}}
+ * 回包result含 window_hours / renewable / remaining_ms。
+ * 仅做资格预检(剩时>阈值则跳过浏览器)；真正续期确认仍走浏览器UI，
+ * 因 _serverFn hash 随前端构建漂移，直调确认易失效。
+ * ponytail: 全API续期(直调确认)在hash+f长期稳定时再做，需解析回包token+min_dwell_ms语义。
+ */
+const RECORDED_POST_HASH = '8a85876cf1da47edc9a524dcba6145449f36592433445062fd5cb967b0bc9453';
+
+/** 从 storageState 中提取 Supabase access_token（未登录/过期返回 null） */
+function accessTokenFromState(state) {
+  try {
+    for (const o of state.origins || []) {
+      for (const kv of o.localStorage || []) {
+        if (!/^sb-.*-auth-token$/.test(kv.name)) continue;
+        const j = JSON.parse(kv.value);
+        if (j && j.access_token && j.expires_at * 1000 > Date.now() + 60000) return j.access_token;
+      }
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+/** 在 TanStack framed 响应里按 key 名取并行 v 数组的值 */
+function framedValue(obj, key) {
+  let hit;
+  const walk = (n) => {
+    if (hit !== undefined || !n || typeof n !== 'object') return;
+    if (Array.isArray(n)) { n.forEach(walk); return; }
+    if (Array.isArray(n.k) && Array.isArray(n.v)) {
+      const i = n.k.indexOf(key);
+      if (i >= 0 && n.v[i] && n.v[i].s !== undefined) { hit = n.v[i].s; return; }
+    }
+    Object.values(n).forEach(walk);
+  };
+  walk(obj);
+  return hit;
+}
+
+function httpsPostJson(urlStr, body, headers) {
+  return new Promise((resolve) => {
+    const u = new URL(urlStr);
+    const data = JSON.stringify(body);
+    const req = https.request({
+      hostname: u.hostname, path: u.pathname + u.search, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers },
+      timeout: 20000,
+    }, (r) => {
+      let buf = '';
+      r.on('data', (c) => (buf += c));
+      r.on('end', () => resolve({ status: r.statusCode, body: buf }));
+    });
+    req.on('error', (e) => resolve({ status: 0, body: '', error: e.message }));
+    req.on('timeout', () => { req.destroy(new Error('timeout')); resolve({ status: 0, body: '', error: 'timeout' }); });
+    req.write(data);
+    req.end();
+  });
+}
+
+/**
+ * 直调查续期资格。返回 { decision: 'SKIP' | 'GO' | 'FALLBACK', remainingH?, note }。
+ * SKIP=剩时充足免开浏览器；GO=到期走浏览器；FALLBACK=直调失败走浏览器。
+ */
+async function apiCheckOne(url, id, state) {
+  const fail = (note) => ({ decision: 'FALLBACK', note });
+  const token = state ? accessTokenFromState(state) : null;
+  if (!token) return fail('无有效 Supabase token，直调跳过');
+  const hash = CFG.serverFnHash || RECORDED_POST_HASH;
+  const body = { t: { t: 10, i: 0, p: { k: ['data'], v: [{ t: 10, i: 1, p: { k: ['id'], v: [{ t: 1, s: id }] }, o: 0 }] }, o: 0 }, f: CFG.serverFnF, m: [] };
+  const r = await httpsPostJson(`https://freemchost.com/_serverFn/${hash}`, body, {
+    Referer: url, 'User-Agent': CFG.ua,
+    accept: 'application/x-tss-framed, application/x-ndjson, application/json',
+    authorization: `Bearer ${token}`, 'x-tsr-serverfn': 'true',
+  });
+  if (r.status !== 200) {
+    log(`📡 直调预检 HTTP ${r.status}${r.error ? ` (${r.error})` : ''}，回退浏览器（hash 可能已漂移，看上次嗅探日志更新 SERVERFN_HASH）`);
+    return fail(`HTTP ${r.status}`);
+  }
+  let remainMs, winH;
+  try {
+    const j = JSON.parse(r.body);
+    remainMs = framedValue(j, 'remaining_ms');
+    winH = framedValue(j, 'window_hours');
+  } catch { /* ignore */ }
+  if (typeof remainMs !== 'number') {
+    log('📡 直调回包形状变化，无法解析 remaining_ms，回退浏览器');
+    return fail('回包无法解析');
+  }
+  const remainingH = remainMs / 3600000;
+  log(`📡 直调预检: 剩余 ${remainingH.toFixed(1)}h（窗口 ${winH || '?'}h）`);
+  if (remainingH > CFG.thresholdHours) {
+    return { decision: 'SKIP', remainingH, note: `剩余 ${remainingH.toFixed(1)}h ≥ 阈值 ${CFG.thresholdHours}h` };
+  }
+  return { decision: 'GO', remainingH, note: `剩余 ${remainingH.toFixed(1)}h，需续期` };
 }
 
 /** 原生 https 发 TG 通知（不引额外依赖），HTML 失败自动降级纯文本 */
@@ -199,7 +298,7 @@ async function loginStateInfo(page) {
         if (!k) continue;
         if (/^sb-.*-auth-token$/.test(k) || /auth-token/i.test(k)) {
           const v = localStorage.getItem(k) || '';
-          if (v && v.length > 20) { out.tokenKeys.push(k); if (!out.token && out.token.length !== 1) out.token = v; }
+          if (v && v.length > 20) { out.tokenKeys.push(k); if (!out.token) out.token = v; }
         }
       }
     } catch { /* ignore */ }
@@ -233,16 +332,8 @@ async function dumpState(context) {
 async function updateGithubSecret(name, value) {
   if (!CFG.ghToken || !CFG.repo) { log('ℹ️ 未提供 GH_TOKEN/GITHUB_REPOSITORY，跳过回写 Secret'); return false; }
   const [owner, repo] = CFG.repo.split('/');
-  const pubkey = await new Promise((resolve) => {
-    const req = https.get({
-      hostname: 'api.github.com', path: `/repos/${owner}/${repo}/actions/secrets/public-key`,
-      headers: { 'User-Agent': 'freemchost-renew', Authorization: `Bearer ${CFG.ghToken}` }, timeout: 15000,
-    }, (r) => { let b = ''; r.on('data', (c) => (b += c)); r.on('end', () => { try { resolve(JSON.parse(b)); } catch { resolve(null); } }); });
-    req.on('error', () => resolve(null));
-  });
-  if (!pubkey || !pubkey.key) { log('❌ 获取仓库公钥失败（检查 GH_TOKEN 权限 / 仓库名）'); return false; }
 
-  // GitHub 加密 = sealed-box；不引依赖则无法本地加密，故改用 gh CLI 更可靠
+  // gh CLI 自带 sealed-box 加密，直接调，不做 https 取公钥（原 pubkey 分支死代码，已删）
   try {
     const { execFile } = require('child_process');
     await new Promise((resolve, reject) => {
@@ -649,7 +740,7 @@ async function doLogin(page) {
   try { await page.waitForURL((u) => !/\/login/i.test(u.href), { timeout: 60000 }); } catch {
     const txt = await page.evaluate(() => (document.body.innerText || '').slice(0, 220)).catch(() => '');
     if (/just a moment|verify you are human|cf-chl/i.test(txt)) { log('🛡️ 命中 Cloudflare 人机校验，建议配置 PROXY_URL / NODE_LINK 更换节点'); await sleep(20000); }
-    if (!/\/login/i.test(page.url()) === false) { log(`❌ 登录超时，当前页: ${page.url()} | 文本: ${txt.slice(0, 120)}`); return false; }
+    if (/\/login/i.test(page.url())) { log(`❌ 登录超时，当前页: ${page.url()} | 文本: ${txt.slice(0, 120)}`); return false; }
   }
   await sleep(1500);
   const ok = await isLoggedIn(page);
@@ -697,6 +788,7 @@ async function doLogin(page) {
   const context = await browser.newContext(ctxOpts);
 
   let authOk = false;
+  let dumped = null;
   const first = await context.newPage();
   try {
     if (state) {
@@ -713,19 +805,39 @@ async function doLogin(page) {
       await dumpState(context);
       throw new Error('登录失败（账密或登录态均不可用）');
     }
-    const dumped = await dumpState(context);
+    dumped = await dumpState(context);
     if (dumped && CFG.autoUpdateState && CFG.ghToken) await updateGithubSecret('AUTH_STATE', dumped);
   } finally { await first.close().catch(() => {}); }
 
   const results = [];
-  for (let i = 0; i < targets.length; i++) {
-    try { results.push(await renewOneServer(context, targets[i], i + 1, targets.length)); }
-    catch (e) { log(`❌ 服务器 ${i + 1} 未捕获异常: ${e.message}`); results.push({ idx: i + 1, total: targets.length, url: targets[i], id: serverIdOf(targets[i]), name: null, status: 'FAIL', before: '-', after: '-', note: e.message.slice(0, 100) }); }
+  let browserTargets = targets.map((url, i) => ({ url, idx: i + 1 }));
+  if (CFG.apiDirect !== 'off') {
+    let liveState = state;
+    try { liveState = JSON.parse(dumped) || state; } catch { /* keep state */ }
+    log('📡 API 直调预检中（check-only，未到期则免开浏览器）…');
+    const remain = [];
+    for (const t of browserTargets) {
+      const c = await apiCheckOne(t.url, serverIdOf(t.url), liveState);
+      if (c.decision === 'SKIP') {
+        log(`⏳ [${t.idx}/${targets.length}] ${c.note}，跳过浏览器`);
+        results.push({ idx: t.idx, total: targets.length, url: t.url, id: serverIdOf(t.url), name: null, status: 'PENDING', before: `${c.remainingH.toFixed(1)}h(直调)`, after: null, note: c.note });
+      } else {
+        log(`➡️ [${t.idx}/${targets.length}] ${c.note}，走浏览器`);
+        remain.push(t);
+      }
+    }
+    browserTargets = remain;
+    if (!browserTargets.length) log('✅ 全部服务器剩余充足，本次免开浏览器操作');
+  }
+  for (const t of browserTargets) {
+    try { results.push(await renewOneServer(context, t.url, t.idx, targets.length)); }
+    catch (e) { log(`❌ 服务器 ${t.idx} 未捕获异常: ${e.message}`); results.push({ idx: t.idx, total: targets.length, url: t.url, id: serverIdOf(t.url), name: null, status: 'FAIL', before: '-', after: '-', note: e.message.slice(0, 100) }); }
     await sleep(1500);
   }
+  results.sort((a, b) => a.idx - b.idx);
   await context.storageState({ path: path.join(CFG.shotDir, 'storage-state-final.json') }).catch(() => {});
   await browser.close();
-  log('🏁 浏览器已关闭');
+  log(`🏁 浏览器已关闭${!browserTargets.length ? '（预检全跳过，实际未操作）' : ''}`);
 
   const ICON = { SUCCESS: '🟢', PENDING: '⚪', NO_BUTTON: '🟡', FAIL: '🔴' };
   const LABEL = { SUCCESS: '续期成功', PENDING: '无需续期', NO_BUTTON: '未找到按钮', FAIL: '失败' };

@@ -52,6 +52,9 @@
 | `RENEW_THRESHOLD_HOURS` | `46` | 剩余时长低于该值才触发续期（小时） |
 | `RENEW_DURATION_LABEL` | `60 hours` | 续期时长文案，可逗号分隔多个候选（60 hours,60h,3 天） |
 | `VERIFY_MIN_HOURS` | `20` | 入库验真最小增量小时（小于则判失败） |
+| `API_DIRECT` | `check` | 直调预检：check=先POST查剩时再走浏览器；off=纯浏览器 |
+| `SERVERFN_HASH` | 留空 | `_serverFn/<hash>`漂移时手动覆盖；直调失败看嗅探日志更新 |
+| `SERVERFN_F` | `63` | 续期意图函数号（录制值63）；直调失败时可试改 |
 | `TIMEZONE` | `Asia/Shanghai` | 通知时间时区 |
 | `LOCALE` | `en-US` | 浏览器语言环境 |
 | `BROWSER_CHANNEL` | 留空 | Chrome/Firefox/Echo 等（如有需要） |

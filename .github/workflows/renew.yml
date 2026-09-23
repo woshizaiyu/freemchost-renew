@@ -63,7 +63,10 @@ jobs:
           SERVER_PAGE_URL: ${{ secrets.SERVER_PAGE_URL }}
           SERVER_ID: ${{ secrets.SERVER_ID }}
           AUTH_STATE: ${{ secrets.AUTH_STATE }}
-          AUTH_STATE_FILE: ''   # 留空；脚本会自动读取仓库文件
+          AUTH_STATE_FILE: ''   # 留空=不读文件；需读仓库文件时填相对路径(如 screenshots/storage-state.json)
+          API_DIRECT: ${{ vars.API_DIRECT || 'check' }}
+          SERVERFN_HASH: ${{ vars.SERVERFN_HASH || '' }}
+          SERVERFN_F: ${{ vars.SERVERFN_F || '63' }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           AUTO_UPDATE_STATE: ${{ vars.AUTO_UPDATE_STATE || 'true' }}
           RENEW_THRESHOLD_HOURS: ${{ vars.RENEW_THRESHOLD_HOURS || '46' }}
