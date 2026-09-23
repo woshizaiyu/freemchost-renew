@@ -802,6 +802,25 @@ async function doLogin(page) {
   return ok;
 }
 
+/* ============================== 汇报 ============================== */
+
+async function reportResults(results) {
+  results.sort((a, b) => a.idx - b.idx);
+  const ICON = { SUCCESS: '🟢', PENDING: '⚪', NO_BUTTON: '🟡', FAIL: '🔴' };
+  const LABEL = { SUCCESS: '续期成功', PENDING: '无需续期', NO_BUTTON: '未找到按钮', FAIL: '失败' };
+  const lines = results.map((r) => {
+    const n = r.name ? ` ${r.name}` : '';
+    return `${ICON[r.status] || '❔'} <b>[${r.idx}/${r.total}] ${r.id}${n}</b>\n   ${LABEL[r.status] || r.status}` +
+      `${r.before ? ` | ${r.before}${r.after ? ` ➔ ${r.after}` : ''}` : ''}${r.note ? `\n   └ ${r.note}` : ''}`;
+  });
+  const sum = `🖥 <b>FreeMCHost 自动续期报告</b>\n\n${lines.join('\n')}\n\n<b>阈值</b> &lt;${CFG.thresholdHours}h 触发 · <b>周期</b> 每 2天巡检\n<b>时间</b> ${nowStr()}`;
+  await sendTelegram(sum);
+  console.log('\n================ 汇总 ================');
+  results.forEach((r) => console.log(`${ICON[r.status]} [${r.idx}/${r.total}] ${r.id} ${r.before}${r.after ? ' ➔ ' + r.after : ''} ${r.note}`));
+  const fails = results.filter((r) => r.status === 'FAIL').length;
+  process.exitCode = fails && fails === results.length ? 1 : 0;
+}
+
 /* ============================== 主流程 ============================== */
 
 (async () => {
@@ -844,38 +863,11 @@ async function doLogin(page) {
   } else { log('🍭 直连模式（若频繁失败请配置 NODE_LINK 或 PROXY_URL）'); }
   if (CFG.channel) { launchOpts.channel = CFG.channel; log(`🧭 channel=${CFG.channel}`); }
 
-  const browser = await chromium.launch(launchOpts);
-  const ctxOpts = { viewport: { width: 1920, height: 1080 }, userAgent: CFG.ua, locale: CFG.locale, timezoneId: CFG.timezone };
-  if (state) ctxOpts.storageState = state;
-  const context = await browser.newContext(ctxOpts);
-
-  let authOk = false;
-  let dumped = null;
-  const first = await context.newPage();
-  try {
-    if (state) {
-      log('🍪 使用注入登录态访问目标页');
-      await first.goto(targets[0], { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
-      await sleep(2500);
-      await dismissNoise(first);
-      if (await isLoggedIn(first)) authOk = true;
-      else log('⚠️ 登录态已失效，降级为账密登录');
-    }
-    if (!authOk && CFG.email && CFG.password) authOk = await doLogin(first);
-    if (!authOk) {
-      await safeShot(first, 'login-failed.png');
-      await dumpState(context);
-      throw new Error('登录失败（账密或登录态均不可用）');
-    }
-    dumped = await dumpState(context);
-    if (dumped && CFG.autoUpdateState && CFG.ghToken) await updateGithubSecret('AUTH_STATE', dumped);
-  } finally { await first.close().catch(() => {}); }
-
+  // 1) API 预检优先：未到期直接汇报退出，不启动浏览器（省 CI 分钟）
   const results = [];
   let browserTargets = targets.map((url, i) => ({ url, idx: i + 1 }));
+  let liveState = state; // 预检无刷新则沿用注入态；登录后会被 dumped 覆盖
   if (CFG.apiDirect !== 'off') {
-    let liveState = state;
-    try { liveState = JSON.parse(dumped) || state; } catch { /* keep state */ }
     log('📡 API 直调预检中（check-only，未到期则免开浏览器）…');
     const remain = [];
     for (const t of browserTargets) {
@@ -889,31 +881,68 @@ async function doLogin(page) {
       }
     }
     browserTargets = remain;
-    if (!browserTargets.length) log('✅ 全部服务器剩余充足，本次免开浏览器操作');
+    if (!browserTargets.length) {
+      log('✅ 全部服务器剩余充足，本次免开浏览器');
+      await reportResults(results);
+      return;
+    }
+  }
+
+  // 2) 有到期目标才启动浏览器
+  const browser = await chromium.launch(launchOpts);
+  const ctxOpts = { viewport: { width: 1920, height: 1080 }, userAgent: CFG.ua, locale: CFG.locale, timezoneId: CFG.timezone };
+  if (state) ctxOpts.storageState = state;
+  const context = await browser.newContext(ctxOpts);
+
+  let authOk = false;
+  let dumped = null;
+  const first = await context.newPage();
+  try {
+    if (state) {
+      log('🍪 使用注入登录态访问目标页');
+      await gotoRetry(first, browserTargets[0].url, { waitUntil: 'domcontentloaded', timeout: CFG.navTimeout });
+      await sleep(2500);
+      await dismissNoise(first);
+      if (await isLoggedIn(first)) authOk = true;
+      else log('⚠️ 登录态已失效，降级为账密登录');
+    }
+    if (!authOk && CFG.email && CFG.password) authOk = await doLogin(first);
+    if (!authOk) {
+      await safeShot(first, 'login-failed.png');
+      await dumpState(context);
+      throw new Error('登录失败（账密或登录态均不可用）');
+    }
+    dumped = await dumpState(context);
+    liveState = null;
+    try { liveState = JSON.parse(dumped) || state; } catch { liveState = state; }
+    if (dumped && CFG.autoUpdateState && CFG.ghToken) await updateGithubSecret('AUTH_STATE', dumped);
+  } finally { await first.close().catch(() => {}); }
+
+  // 3) 登录刷新 token 后，对 GO/FALLBACK 目标再预检一次（token 刚续上可能剩时已足）
+  if (CFG.apiDirect !== 'off') {
+    const remain = [];
+    for (const t of browserTargets) {
+      if (results.some((r) => r.idx === t.idx)) continue;
+      const c = await apiCheckOne(t.url, serverIdOf(t.url), liveState);
+      if (c.decision === 'SKIP') {
+        log(`⏳ [${t.idx}/${targets.length}] 登录后复检：${c.note}，跳过浏览器`);
+        results.push({ idx: t.idx, total: targets.length, url: t.url, id: serverIdOf(t.url), name: null, status: 'PENDING', before: `${c.remainingH.toFixed(1)}h(直调)`, after: null, note: c.note });
+      } else {
+        remain.push(t);
+      }
+    }
+    browserTargets = remain;
   }
   for (const t of browserTargets) {
     try { results.push(await renewOneServer(context, t.url, t.idx, targets.length)); }
     catch (e) { log(`❌ 服务器 ${t.idx} 未捕获异常: ${e.message}`); results.push({ idx: t.idx, total: targets.length, url: t.url, id: serverIdOf(t.url), name: null, status: 'FAIL', before: '-', after: '-', note: e.message.slice(0, 100) }); }
     await sleep(1500);
   }
-  results.sort((a, b) => a.idx - b.idx);
   await context.storageState({ path: path.join(CFG.shotDir, 'storage-state-final.json') }).catch(() => {});
   await browser.close();
-  log(`🏁 浏览器已关闭${!browserTargets.length ? '（预检全跳过，实际未操作）' : ''}`);
+  log('🏁 浏览器已关闭');
 
-  const ICON = { SUCCESS: '🟢', PENDING: '⚪', NO_BUTTON: '🟡', FAIL: '🔴' };
-  const LABEL = { SUCCESS: '续期成功', PENDING: '无需续期', NO_BUTTON: '未找到按钮', FAIL: '失败' };
-  const lines = results.map((r) => {
-    const n = r.name ? ` ${r.name}` : '';
-    return `${ICON[r.status] || '❔'} <b>[${r.idx}/${r.total}] ${r.id}${n}</b>\n   ${LABEL[r.status] || r.status}` +
-      `${r.before ? ` | ${r.before}${r.after ? ` ➔ ${r.after}` : ''}` : ''}${r.note ? `\n   └ ${r.note}` : ''}`;
-  });
-  const sum = `🖥 <b>FreeMCHost 自动续期报告</b>\n\n${lines.join('\n')}\n\n<b>阈值</b> &lt;${CFG.thresholdHours}h 触发 · <b>周期</b> 每 2天巡检\n<b>时间</b> ${nowStr()}`;
-  await sendTelegram(sum);
-  console.log('\n================ 汇总 ================');
-  results.forEach((r) => console.log(`${ICON[r.status]} [${r.idx}/${r.total}] ${r.id} ${r.before}${r.after ? ' ➔ ' + r.after : ''} ${r.note}`));
-  const fails = results.filter((r) => r.status === 'FAIL').length;
-  process.exitCode = fails && fails === results.length ? 1 : 0;
+  await reportResults(results);
 })().catch(async (e) => {
   console.error('❌ 全局致命错误:', e.message);
   await sendTelegram(`🚨 <b>FreeMCHost 运行异常</b>\n<code>${String(e.message).slice(0, 200)}</code>\n⏱ ${nowStr()}`);
