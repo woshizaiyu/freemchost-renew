@@ -1,0 +1,25 @@
+{
+  "name": "freemchost-renew",
+  "version": "1.0.0",
+  "description": "FreeMCHost (https://freemchost.com) Minecraft 服务器自动续期脚本",
+  "main": "renew.js",
+  "scripts": {
+    "start": "node renew.js",
+    "renew": "node renew.js"
+  },
+  "keywords": [
+    "freemchost",
+    "minecraft",
+    "auto-renew",
+    "playwright",
+    "github-actions"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "playwright": "^1.49.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
