@@ -5,3 +5,7 @@ storage-state*.json
 .env
 .DS_Store
 Thumbs.db
+# 录制文件（含真实 cookie / supabase token，明文凭证，绝不提交）
+.tmp/
+agentscribe-*.js
+agentscribe-*.json
