@@ -655,16 +655,29 @@ async function renewOneServer(context, url, idx, total) {
     const remainH = before ? before.totalHours : null;
     log(`⏱️ 剩余时长: ${result.before}${remainH != null ? ` (${remainH.toFixed(1)}h)` : ''}`);
 
-    // 续期入口（弹窗内按钮 / Renew now 文本）
-    const renewBtn = manageScope(page).locator('button:has-text("Renew")').first();
+    // 续期入口（录制 grounded 2026-09-25：按钮文案精确就是 "Renew"+右箭头，
+    // 列表卡片结构 a.group.relative > button.inline-flex.items-center）
+    let renewBtn = manageScope(page).locator('button:text-is("Renew")').first();
     let btnText = '';
     try {
-      await renewBtn.waitFor({ state: 'visible', timeout: 8000 });
-      btnText = (await renewBtn.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+      await renewBtn.waitFor({ state: 'visible', timeout: 4000 });
     } catch {
-      const found = await clickByText(manageScope(page), ['Renew now', 'Renew'], { timeout: 1500 });
-      if (!found) { result.note = '未找到 Renew 按钮（可能未到期或 UI 改版）'; await safeShot(page, `server-${idx}-norenew.png`); result.status = 'NO_BUTTON'; return result; }
+      renewBtn = manageScope(page).locator('button:has-text("Renew")').first();
+      try {
+        await renewBtn.waitFor({ state: 'visible', timeout: 8000 });
+      } catch {
+        // 录制结构备用定位（多 Renew 文案并存时防抓错）
+        const grounded = manageScope(page).locator('a.group.relative > button.inline-flex.items-center:has-text("Renew")').first();
+        if (await grounded.isVisible().catch(() => false)) {
+          renewBtn = grounded;
+          log('🎯 命中录制 grounded 选择器');
+        } else {
+          const found = await clickByText(manageScope(page), ['Renew now', 'Renew'], { timeout: 1500 });
+          if (!found) { result.note = '未找到 Renew 按钮（可能未到期或 UI 改版）'; await safeShot(page, `server-${idx}-norenew.png`); result.status = 'NO_BUTTON'; return result; }
+        }
+      }
     }
+    btnText = (await renewBtn.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
     if (btnText) log(`🔘 续期按钮文案: [${btnText.slice(0, 60)}]`);
 
     // "Renew in 12:34:56" = 未到期
